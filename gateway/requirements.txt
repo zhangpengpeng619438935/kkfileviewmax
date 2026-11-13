@@ -1,0 +1,11 @@
+fastapi>=0.110
+uvicorn[standard]>=0.27
+aiomysql>=0.2.0
+cryptography>=42.0
+redis>=5.0
+httpx>=0.27
+openpyxl>=3.1
+# CAD 出图：PDFium 是 C++ 实现，渲染 444 万条线段的 PDF 只要 0.8 秒
+# （pdf.js 同样的文件 4 分钟都画不出来）。pillow 用来把位图编成 PNG。
+pypdfium2>=5.0
+pillow>=10.0

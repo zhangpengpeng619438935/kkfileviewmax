@@ -1,0 +1,157 @@
+_CADV_PAGE = """<!DOCTYPE html><html lang="zh-CN"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>__TITLE__</title>
+<style>
+*{box-sizing:border-box}
+html,body{margin:0;height:100%%;overflow:hidden;background:#f4f5f7;
+ font:13px -apple-system,"Microsoft YaHei",sans-serif;color:#3a3f47}
+#bar{height:36px;display:flex;align-items:center;gap:6px;padding:0 10px;background:#fff;
+ border-bottom:1px solid #e3e6ea;position:relative;z-index:5}
+#bar .ttl{font-weight:600;max-width:34%%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#bar .sp{flex:1}
+#bar button{border:1px solid #cfd4da;background:#fff;border-radius:4px;padding:3px 8px;
+ font-size:12px;cursor:pointer;color:#3a3f47}
+#bar button.on{background:#2f6feb;border-color:#2f6feb;color:#fff}
+#info{color:#8a9099;font-size:11.5px}
+#stage{position:absolute;inset:36px 0 0 0;overflow:hidden;cursor:grab;background:#fff}
+#stage.drag{cursor:grabbing}
+#wrap{position:absolute;left:0;top:0;transform-origin:0 0;will-change:transform}
+#wrap svg{display:block}
+#tip{position:fixed;left:50%%;bottom:14px;transform:translateX(-50%%);background:#2f6feb;color:#fff;
+ padding:5px 12px;border-radius:14px;font-size:12px;display:none;z-index:9}
+#tip.on{display:block}
+#ld{position:absolute;inset:36px 0 0 0;background:rgba(255,255,255,.92);display:flex;
+ align-items:center;justify-content:center;flex-direction:column;gap:10px;z-index:6}
+#ld.hide{display:none}
+.sp2{width:30px;height:30px;border:3px solid #e6e8eb;border-top-color:#2f6feb;border-radius:50%%;
+ animation:r .9s linear infinite}
+@keyframes r{to{transform:rotate(360deg)}}
+</style></head><body>
+<div id="bar">
+  <span class="ttl">__TITLE__</span>
+  <span id="info"></span>
+  <span class="sp"></span>
+  <button id="zo">－</button><button id="zi">＋</button>
+  <button id="fit">适应</button>
+  <button id="meas">量尺寸</button>
+  <button id="reset">复位</button>
+</div>
+<div id="stage"><div id="wrap"></div></div>
+<div id="ld"><div class="sp2"></div><div id="ldt">正在把 DWG 转成矢量图…</div></div>
+<div id="tip">点击两个点测量（Esc 退出）</div>
+<script>
+var FK=__FK__, KKT=__KKT__, svgEl=null, vb=null;
+var k=1, tx=0, ty=0, stage=document.getElementById('stage'), wrap=document.getElementById('wrap');
+var ld=document.getElementById('ld'), ldt=document.getElementById('ldt'), info=document.getElementById('info');
+var tip=document.getElementById('tip'), meas=false, pts=[], marks=[];
+
+function apply(){ wrap.style.transform='translate('+tx+'px,'+ty+'px) scale('+k+')'; }
+function zoom(f, cx, cy){
+  var nk=Math.min(60, Math.max(0.02, k*f));
+  var r=nk/k;
+  if(cx!==undefined){ tx = cx-(cx-tx)*r; ty = cy-(cy-ty)*r; }
+  k=nk; apply();
+}
+function fitView(){
+  if(!vb) return;
+  var W=stage.clientWidth, H=stage.clientHeight;
+  k=Math.min(W/vb.w, H/vb.h)*0.96;
+  tx=(W-vb.w*k)/2 - vb.x*k; ty=(H-vb.h*k)/2 - vb.y*k;
+  apply();
+}
+
+// 加载：先问网关有没有成品，没有就等它渲染（约 4 秒）
+function load(){
+  fetch('/cadvec/'+FK+'?kkt='+encodeURIComponent(KKT), {cache:'no-store'})
+    .then(function(r){
+      if(r.status===202) return r.json().then(function(j){ throw {wait:true, j:j}; });
+      if(!r.ok) throw new Error('HTTP '+r.status);
+      return r.text();
+    })
+    .then(function(txt){
+      wrap.innerHTML = txt;
+      svgEl = wrap.querySelector('svg');
+      var vbAttr = svgEl.getAttribute('viewBox').split(/\s+/).map(Number);
+      vb = {x:vbAttr[0], y:vbAttr[1], w:vbAttr[2], h:vbAttr[3]};
+      svgEl.setAttribute('width', vb.w); svgEl.setAttribute('height', vb.h);
+      fitView();
+      ld.classList.add('hide');
+      info.textContent = '图纸 ' + Math.round(vb.w) + ' × ' + Math.round(vb.h) + ' 单位 · 矢量';
+    })
+    .catch(function(e){
+      if(e && e.wait){ setTimeout(load, 1200); return; }
+      ldt.textContent = '渲染失败：' + (e && e.message ? e.message : e);
+    });
+}
+load();
+
+stage.addEventListener('wheel', function(e){
+  e.preventDefault();
+  var r=stage.getBoundingClientRect();
+  zoom(e.deltaY<0?1.15:1/1.15, e.clientX-r.left, e.clientY-r.top);
+}, {passive:false});
+
+var down=false, lx=0, ly=0;
+stage.addEventListener('mousedown', function(e){
+  if(meas) return;
+  down=true; lx=e.clientX; ly=e.clientY; stage.classList.add('drag');
+});
+window.addEventListener('mousemove', function(e){
+  if(!down) return;
+  tx+=e.clientX-lx; ty+=e.clientY-ly; lx=e.clientX; ly=e.clientY; apply();
+});
+window.addEventListener('mouseup', function(){ down=false; stage.classList.remove('drag'); });
+
+// 量尺寸：把屏幕点换算成图纸坐标，两点距离就是真实尺寸
+function toSvg(ev){
+  if(!svgEl) return null;
+  var p=svgEl.createSVGPoint(); p.x=ev.clientX; p.y=ev.clientY;
+  var m=svgEl.getScreenCTM(); if(!m) return null;
+  return p.matrixTransform(m.inverse());
+}
+function mark(a, b){
+  var g=document.createElementNS('http://www.w3.org/2000/svg','g');
+  var l=document.createElementNS('http://www.w3.org/2000/svg','line');
+  l.setAttribute('x1',a.x); l.setAttribute('y1',a.y);
+  l.setAttribute('x2',b.x); l.setAttribute('y2',b.y);
+  l.setAttribute('stroke','#e0245e'); l.setAttribute('stroke-width', Math.max(0.5, vb.w/900));
+  g.appendChild(l);
+  [a,b].forEach(function(p){
+    var c=document.createElementNS('http://www.w3.org/2000/svg','circle');
+    c.setAttribute('cx',p.x); c.setAttribute('cy',p.y);
+    c.setAttribute('r', Math.max(1, vb.w/500)); c.setAttribute('fill','#e0245e');
+    g.appendChild(c);
+  });
+  svgEl.appendChild(g); marks.push(g);
+  return Math.hypot(b.x-a.x, b.y-a.y);
+}
+stage.addEventListener('click', function(ev){
+  if(!meas) return;
+  var p=toSvg(ev); if(!p) return;
+  pts.push(p);
+  if(pts.length===2){
+    var d=mark(pts[0], pts[1]);
+    tip.textContent='距离 ' + d.toFixed(2) + ' 图纸单位 · 继续点两个点可再测（Esc 退出）';
+    pts=[];
+  } else {
+    tip.textContent='已选起点，再点一个点';
+  }
+});
+document.getElementById('meas').onclick=function(){
+  meas=!meas; this.classList.toggle('on', meas);
+  tip.classList.toggle('on', meas);
+  tip.textContent = meas ? '点击两个点测量（Esc 退出）' : '';
+  pts=[];
+};
+document.getElementById('zi').onclick=function(){ zoom(1.2, stage.clientWidth/2, stage.clientHeight/2); };
+document.getElementById('zo').onclick=function(){ zoom(1/1.2, stage.clientWidth/2, stage.clientHeight/2); };
+document.getElementById('fit').onclick=fitView;
+document.getElementById('reset').onclick=function(){
+  marks.forEach(function(g){ g.remove(); }); marks=[]; pts=[];
+  fitView();
+};
+window.addEventListener('keydown', function(e){
+  if(e.key==='Escape'){ document.getElementById('meas').click(); }
+});
+</script>
+</body></html>"""

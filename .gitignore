@@ -1,0 +1,78 @@
+# ---- 运行时数据与产物（绝不能进仓库：几百 MB 且随时变）----
+data/
+tmp/
+*.log
+*.pid
+
+# ---- 密钥 ----
+docs/gitlab仓库.txt
+*.pem
+*.key
+.env
+
+# ---- 测试样本：取自源站的大文件，随时可再取 ----
+docs/*.zip
+docs/*.7z
+docs/*.rar
+docs/*.xlsx
+docs/*.xls
+docs/*.pptx
+docs/*.ppt
+docs/*.docx
+docs/*.doc
+docs/*.pdf
+docs/*.dwg
+docs/*.DWG
+docs/*.dxf
+docs/*.DXF
+docs/*.step
+docs/*.STEP
+docs/*.stp
+docs/*.STP
+docs/*.fcstd
+docs/*.FCStd
+docs/*.FCSTD
+docs/*.png
+docs/*.jpg
+docs/examples/
+samples/
+
+# ---- 排查截图（根目录与 tools 下的临时产物）----
+/*.png
+/*.jpg
+/tools/*.png
+/tools/t.dwg
+/tools/*.bin
+
+# ---- 可从引擎/前端重新获取的大二进制 ----
+# occt 解析器 21MB，服务器上按需 curl；three.js 需要保留（离线部署依赖）
+tools/stepmesh/*.wasm
+tools/stepmesh/occt-import-js.js
+
+# ---- Python ----
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# ---- 前端 ----
+univer-preview/node_modules/
+univer-preview/dist/
+
+# ---- 编辑器 ----
+.vscode/
+.idea/
+.DS_Store
+
+# ---- 临时打包产物 ----
+*.tgz
+
+# ---- 前端验证脚本依赖 ----
+node_modules/
+
+# ---- 调试临时文件（分析脚本的中间产物，别顺手提交）----
+.tmp_*
+Step*.svg
+dwg_*.svg
+tools/dev/_*.png
+tools/dev/_stepjs.js

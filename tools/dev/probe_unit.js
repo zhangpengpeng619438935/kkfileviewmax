@@ -1,0 +1,20 @@
+const puppeteer = require('puppeteer-core');
+const BASE = process.argv[2], FK = process.argv[3], KKT = process.argv[4];
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+(async () => {
+  const b = await puppeteer.launch({ executablePath:'C:/Program Files/Google/Chrome/Application/chrome.exe', headless:true, args:['--no-sandbox'] });
+  const p = await b.newPage();
+  await p.setViewport({ width:1300, height:820 });
+  await p.goto(BASE + '/cadv/' + FK + '?kkt=' + encodeURIComponent(KKT), { waitUntil:'domcontentloaded', timeout:90000 });
+  await p.waitForFunction(() => { const l=document.getElementById('ld'); return l && l.className.indexOf('hide')>=0; }, { timeout:120000 });
+  await sleep(600);
+  console.log('  信息栏: ' + await p.$eval('#info', el => el.textContent));
+  console.log('  顶栏链接: ' + await p.$$eval('#bar a', els => els.map(e => e.textContent + '→' + e.href.split('?')[0]).join(' ')));
+  await p.click('#meas'); await sleep(300);
+  const box = await p.$eval('#stage', el => { const r=el.getBoundingClientRect(); return {x:r.x,y:r.y,w:r.width,h:r.height}; });
+  await p.mouse.click(box.x + box.w*0.4, box.y + box.h*0.45); await sleep(300);
+  await p.mouse.click(box.x + box.w*0.62, box.y + box.h*0.45); await sleep(500);
+  console.log('  量尺寸: ' + await p.$eval('#tip', el => el.textContent));
+  await p.screenshot({ path:'unit_check.png' });
+  await b.close();
+})().catch(e => { console.error('ERR', e.message); process.exit(2); });

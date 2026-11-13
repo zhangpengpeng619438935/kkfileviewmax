@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>文件预览服务 · 接口统计看板</title>
+<link rel="stylesheet" href="/style.css">
+<link rel="icon" href="data:,">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">KK</span>
+    <div>
+      <h1>文件预览服务 · 接口统计</h1>
+      <p class="sub" id="envLine">127.0.0.1</p>
+    </div>
+  </div>
+  <div class="who">
+    <span id="whoami" class="state">访客（只读）</span>
+    <button class="ghost hidden" id="btnAdminOut">退出管理</button>
+  </div>
+</header>
+
+<nav class="tabs">
+  <button class="tab active" data-view="overview">总览</button>
+  <button class="tab" data-view="health">服务健康</button>
+  <button class="tab" data-view="traffic">访问量</button>
+  <button class="tab" data-view="files">文件</button>
+  <button class="tab" data-view="latency">加载耗时</button>
+  <button class="tab" data-view="audit">审计日志</button>
+  <button class="tab" data-view="alerts">服务告警</button>
+  <button class="tab" data-view="failures">预览失败</button>
+  <button class="tab" data-view="apps">系统账号</button>
+  <span class="rangeSel">
+    统计范围
+    <select id="globalRange">
+      <option value="hour">按小时（近 24 小时）</option>
+      <option value="day" selected>按天（近 30 天）</option>
+      <option value="week">按周（近 12 周）</option>
+      <option value="month">按月（近 12 个月）</option>
+      <option value="total">总计（近 10 年）</option>
+    </select>
+  </span>
+</nav>
+
+<!-- 刷新状态单独一行：挤在菜单右边会把 9 个标签页压变形 -->
+<div class="statusbar">
+  <span id="lastUpdate" class="state">尚未刷新</span>
+  <span class="refresh">
+    <label><input type="checkbox" id="autoRefresh" checked> 自动刷新</label>
+    <button class="ghost" id="btnRefresh">立即刷新</button>
+  </span>
+</div>
+
+<main>
+  <section id="view-overview" class="view">
+    <div class="healthbar" id="healthBar"></div>
+    <div class="cards" id="summaryCards"></div>
+    <div class="grid2">
+      <div class="panel"><div class="panel-head"><h2>访问量趋势</h2>
+        <span class="state">粒度跟随上方「统计范围」</span></div>
+        <div id="chartTrend" class="chart"></div></div>
+      <div class="panel"><div class="panel-head"><h2>调用系统分布</h2>
+        <span class="state">点击扇区看该系统调用记录</span></div>
+        <div id="chartApps" class="chart"></div></div>
+    </div>
+  </section>
+
+  <section id="view-apps" class="view hidden">
+    <div class="panel" id="adminLoginBox">
+      <div class="panel-head"><h2>管理员登录</h2></div>
+      <div class="filters">
+        <input id="adminToken" type="password" placeholder="管理员令牌 (ADMIN_TOKEN)">
+        <button id="btnAdminLogin">登录</button>
+        <button class="ghost" id="btnAdminLogout">退出</button>
+        <span class="state" id="adminState">未登录</span>
+      </div>
+      <p class="state">登录有效期 <b>3 天</b>，到期后需重新输入令牌。令牌位于部署目录
+        <code>.env</code> 的 <code>ADMIN_TOKEN</code>（当前默认 change-me-admin-token，建议尽快修改）。
+        看板浏览不需要登录，只有这里的账号管理需要。</p>
+    </div>
+
+    <div id="adminBody" class="hidden">
+      <div class="panel">
+        <div class="panel-head"><h2>新增 / 更新接入系统</h2></div>
+        <div class="form-grid">
+          <label>系统标识 appId<input id="fAppId" placeholder="例如 mes"></label>
+          <label>系统名称<input id="fAppName" placeholder="例如 MES 制造执行系统"></label>
+          <label>密钥 appSecret<input id="fAppSecret" placeholder="留空自动生成强口令"></label>
+          <label>QPS 限额<input id="fQps" type="number" value="60"></label>
+          <label>IP 白名单<input id="fIp" placeholder="逗号分隔, 留空不限制"></label>
+        </div>
+        <div class="form-actions">
+          <button id="btnCreateApp">生成 / 保存</button>
+          <span class="state" id="createMsg"></span>
+        </div>
+        <p class="state">IP 白名单留空 = 不限制来源 IP（默认）。需要收紧时填入该系统服务器 IP，逗号分隔，保存后立即生效。</p>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><h2>已接入系统</h2>
+          <button class="ghost" id="btnReloadApps">刷新</button></div>
+        <div class="table-wrap"><table id="tableApps"></table></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="view-health" class="view hidden">
+    <div class="cards" id="healthCards"></div>
+    <div class="panel">
+      <div class="panel-head"><h2>服务明细</h2>
+        <button class="ghost" id="btnHealthRefresh">重新检查</button></div>
+      <div class="table-wrap"><table id="tableHealth"></table></div>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><h2>运行指标</h2></div>
+      <div class="cards" id="healthMetrics"></div>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><h2>部署信息</h2></div>
+      <div class="table-wrap"><table id="tableDeploy"></table></div>
+    </div>
+  </section>
+
+  <section id="view-traffic" class="view hidden">
+    <div class="grid2">
+      <div class="panel"><div class="panel-head"><h2 id="trafficTitle">访问分布</h2>
+        <span class="state" id="trafficScope"></span></div>
+        <div id="chartHour" class="chart"></div></div>
+      <div class="panel"><div class="panel-head"><h2>成功 / 失败</h2>
+        <span class="state" id="statusScope">点击扇区看明细</span></div>
+        <div id="chartStatus" class="chart"></div></div>
+    </div>
+    <div class="panel" id="failPanel">
+      <div class="panel-head"><h2>失败原因</h2>
+        <span class="state" id="failRange"></span>
+        <button class="ghost" id="btnFailToAudit">查看失败明细</button></div>
+      <div class="table-wrap"><table id="tableFails"></table></div>
+    </div>
+    <div class="panel"><div class="panel-head"><h2>工号活跃 TOP20</h2>
+      <span class="state">按「工号 + 系统」统计</span></div>
+      <div class="table-wrap"><table id="tableEmp"></table></div></div>
+  </section>
+
+  <section id="view-files" class="view hidden">
+    <div class="panel"><div class="panel-head"><h2>浏览最多的文件</h2>
+      <span class="state">范围跟随上方「统计范围」</span></div>
+      <div class="table-wrap"><table id="tableFiles"></table></div></div>
+    <div class="panel"><div class="panel-head"><h2>文件 TOP10（次数）</h2></div>
+      <div id="chartFiles" class="chart"></div></div>
+  </section>
+
+  <section id="view-latency" class="view hidden">
+    <div class="cards" id="latencyCards"></div>
+    <div class="grid2">
+      <div class="panel"><div class="panel-head"><h2>加载耗时分布（申请 → 内容可见）</h2></div>
+        <div id="chartHist" class="chart"></div></div>
+      <div class="panel"><div class="panel-head"><h2>错误与状态码</h2></div>
+        <div id="chartErrors" class="chart"></div></div>
+    </div>
+  </section>
+
+  <section id="view-audit" class="view hidden">
+    <div class="panel">
+      <div class="panel-head"><h2>审计日志</h2>
+        <div class="filters">
+          <input id="fEmp" placeholder="工号">
+          <input id="fApp" placeholder="系统 appId">
+          <input id="fKeyword" placeholder="文件名关键字">
+          <input id="fFrom" type="date">
+          <input id="fTo" type="date">
+          <button id="btnSearch">查询</button>
+          <button id="btnExport">导出 CSV</button>
+          <button class="ghost" id="btnClearFilter">清除筛选</button>
+        </div>
+      </div>
+      <p class="state" id="auditHint" style="margin:0 0 8px"></p>
+      <div class="table-wrap"><table id="tableAudit"></table></div>
+      <div class="pager">
+        <button id="prevPage">上一页</button>
+        <span id="pageInfo" class="state"></span>
+        <button id="nextPage">下一页</button>
+      </div>
+    </div>
+  </section>
+
+  <section id="view-alerts" class="view hidden">
+    <div class="panel" style="margin-top:0">
+      <div class="panel-head"><h2>服务告警</h2>
+        <div class="filters">
+          <select id="saDays">
+            <option value="1">近 1 天</option>
+            <option value="7">近 7 天</option>
+            <option value="30" selected>近 30 天</option>
+            <option value="90">近 90 天</option>
+            <option value="180">近 180 天</option>
+          </select>
+          <select id="saKind"><option value="">全部类型</option></select>
+          <select id="saLevel">
+            <option value="">全部级别</option>
+            <option value="critical">严重</option>
+            <option value="warn">警告</option>
+          </select>
+          <select id="saStatus">
+            <option value="">全部状态</option>
+            <option value="open">未恢复</option>
+            <option value="resolved">已恢复</option>
+          </select>
+          <input id="saKeyword" placeholder="对象 / 详情关键字">
+          <button id="btnSaSearch">查询</button>
+          <button id="btnSaExport">导出 CSV</button>
+          <button class="ghost" id="btnSaClear">清除筛选</button>
+        </div>
+      </div>
+      <p class="state" id="saHint" style="margin:0"></p>
+      <p class="state" style="margin:6px 0 0">口径：只看<b>服务压力</b>——多系统同时限流、排队/加载超 5 分钟、CPU 内存磁盘逼近限额、转换异常。
+        文件打不开（404 / 加密 / 签名过期）属于「预览失败」原因，不算告警。
+        每分钟巡检一次，条件消失后自动置为「已恢复」，一条告警从触发到恢复算一条。</p>
+    </div>
+    <div class="cards" id="saCards"></div>
+    <div class="grid2">
+      <div class="panel" style="margin-top:0"><div class="panel-head"><h2>每日告警数</h2>
+        <span class="state">红=严重，橙=警告</span></div>
+        <div id="chartSaDay" class="chart"></div></div>
+      <div class="panel" style="margin-top:0"><div class="panel-head"><h2>告警类型</h2>
+        <span class="state">点扇区只看该类型，再点取消</span></div>
+        <div id="chartSaKind" class="chart"></div></div>
+    </div>
+    <div class="panel">
+      <div class="table-wrap"><table id="tableSa"></table></div>
+      <div class="pager">
+        <button id="saPrev">上一页</button>
+        <span id="saPageInfo" class="state"></span>
+        <button id="saNext">下一页</button>
+      </div>
+    </div>
+  </section>
+
+  <section id="view-failures" class="view hidden">
+    <div class="panel" style="margin-top:0">
+      <div class="panel-head"><h2>预览失败原因</h2>
+        <div class="filters">
+          <select id="alertDays">
+            <option value="7">近 7 天</option>
+            <option value="30">近 30 天</option>
+            <option value="90">近 90 天</option>
+            <option value="180" selected>近 180 天</option>
+          </select>
+          <input id="aApp" placeholder="系统 appId">
+          <input id="aEmp" placeholder="工号">
+          <input id="aStatus" placeholder="状态码，如 422,429">
+          <input id="aKeyword" placeholder="文件名 / 原因关键字">
+          <button id="btnAlertSearch">查询</button>
+          <button id="btnAlertExport">导出 CSV</button>
+          <button class="ghost" id="btnAlertClear">清除筛选</button>
+        </div>
+      </div>
+      <p class="state" id="alertHint" style="margin:0"></p>
+      <p class="state" style="margin:6px 0 0">口径：每次打开失败算一条，回答"哪个文件、为什么打不开"
+        （源文件不可达、文档加密、单次被限流、转换失败、服务异常）。
+        服务层面的压力问题见「服务告警」。数据保留 180 天。</p>
+    </div>
+    <div class="cards" id="alertCards"></div>
+    <div class="grid2">
+      <div class="panel" style="margin-top:0"><div class="panel-head"><h2>每日告警数</h2>
+        <span class="state">按天统计，便于看突发</span></div>
+        <div id="chartAlertDay" class="chart"></div></div>
+      <div class="panel" style="margin-top:0"><div class="panel-head"><h2>告警类型</h2>
+        <span class="state">点扇区只看该类型，再点取消</span></div>
+        <div id="chartAlertKind" class="chart"></div></div>
+    </div>
+    <div class="panel">
+      <div class="table-wrap"><table id="tableAlerts"></table></div>
+      <div class="pager">
+        <button id="aPrev">上一页</button>
+        <span id="aPageInfo" class="state"></span>
+        <button id="aNext">下一页</button>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="foot">自研预览引擎（内核：kkFileView）· 网关与统计看板 · 数据每分钟聚合一次</footer>
+
+<!-- 失败详情弹窗：点审计日志里"失败"那一格打开 -->
+<div class="modal hidden" id="failModal">
+  <div class="modal-mask" id="failModalMask"></div>
+  <div class="modal-box">
+    <div class="modal-head">
+      <h3 id="failModalTitle">失败详情</h3>
+      <button class="ghost" id="btnFailModalClose">关闭</button>
+    </div>
+    <div class="modal-body" id="failModalBody"></div>
+  </div>
+</div>
+
+<script src="/vendor/echarts.min.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

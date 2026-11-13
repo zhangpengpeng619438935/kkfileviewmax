@@ -1,0 +1,20 @@
+[Unit]
+Description=kkfileview preview worker (mesh 三角化)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kkfileview
+WorkingDirectory=/opt/kkfileview-service
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /opt/kkfileview-service/tools/step_worker.py --stage mesh --daemon
+Restart=always
+RestartSec=3
+# 日志：journalctl -u kk-worker-<stage> -f；同时留一份在 /var/log/kkfileview
+StandardOutput=append:/var/log/kkfileview/worker.log
+StandardError=append:/var/log/kkfileview/worker.log
+
+[Install]
+WantedBy=multi-user.target

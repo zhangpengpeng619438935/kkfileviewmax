@@ -1,0 +1,19 @@
+{
+  "name": "univer-preview",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build"
+  },
+  "dependencies": {
+    "@univerjs/presets": "1.1.0",
+    "@univerjs/preset-sheets-core": "1.1.0",
+    "@univerjs/slides": "1.1.0",
+    "@univerjs/slides-ui": "1.1.0"
+  },
+  "devDependencies": {
+    "vite": "^5.4.11"
+  }
+}

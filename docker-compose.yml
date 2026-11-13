@@ -1,0 +1,264 @@
+name: kkfileview-service
+
+services:
+  # ---------------- 统计库 ----------------
+  kk-mysql:
+    image: mysql:8.0
+    container_name: kk-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DB}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      TZ: Asia/Shanghai
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      - --event-scheduler=ON
+      - --max_connections=500
+      - --default-time-zone=+08:00
+    ports:
+      - "${MYSQL_HOST_PORT}:3306"
+    volumes:
+      - ./data/mysql:/var/lib/mysql
+      - ./sql:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p${MYSQL_ROOT_PASSWORD} --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 40s
+    logging: &log
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ---------------- 缓存 / 计数 ----------------
+  kk-redis:
+    image: redis:7-alpine
+    container_name: kk-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "512mb",
+              "--maxmemory-policy", "allkeys-lru"]
+    ports:
+      - "${REDIS_HOST_PORT}:6379"
+    volumes:
+      - ./data/redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    logging: *log
+
+  # ---------------- 预览引擎(不对外暴露端口) ----------------
+  kkfileview:
+    image: ${KK_IMAGE}
+    container_name: kkfileview
+    restart: unless-stopped
+    expose:
+      - "8012"
+    environment:
+      KK_SERVER_PORT: 8012
+      KK_CONTEXT_PATH: /
+      # 反代前缀: 网关把 /kk/* 转发到引擎, 页面资源也走 /kk/
+      KK_BASE_URL: http://${HOST_IP}:${GATEWAY_PORT}/kk/
+      KK_TRUST_HOST: ${TRUST_HOSTS:-default}
+      KK_CACHE_TYPE: jdk
+      KK_CACHE_ENABLED: "true"
+      KK_OFFICE_PREVIEW_TYPE: pdf
+      # CAD 预览方式: svg(默认) 会把每个线段写成 SVG path, 1 个 146KB 的 dwg 就产出 17MB,
+      # 实测一份布局平面图产出 191MB —— 传输和浏览器解析都是分钟级。pdf 用矢量对象,
+      # 体积小一个数量级, pdf.js 还能先渲染第一页。
+      KK_CAD_PREVIEW_TYPE: ${KK_CAD_PREVIEW_TYPE:-pdf}
+      # Aspose.CAD 在没有国家码的 JVM 里会抛 "Neutral cultures cannot be used in
+      # formatting and parsing", 导致 cadToPdf 直接失败。这里显式给语言+国家。
+      JAVA_TOOL_OPTIONS: -Duser.language=zh -Duser.country=CN
+      KK_MEDIA_CONVERT_DISABLE: "true"
+      KK_FILE_UPLOAD_ENABLED: "true"
+      KK_PDF_DOWNLOAD_DISABLE: "true"
+      KK_PDF_PRINT_DISABLE: "false"
+      OFFICE_PLUGIN_SERVER_PORTS: ${KK_OFFICE_PORTS}
+      OFFICE_PLUGIN_TASK_TIMEOUT: 5m
+      WATERMARK_TXT: "${WATERMARK_TXT}"
+      WATERMARK_FONT: 微软雅黑
+      WATERMARK_FONTSIZE: 18px
+      WATERMARK_ALPHA: ${WATERMARK_ALPHA:-0.15}
+      TZ: Asia/Shanghai
+    volumes:
+      # 4.4.0 的运行目录是 /opt/kkFileView-4.4.0（4.1.0 时代是 4.1.0，升级时已改）
+      - ./data/kkfileview:/opt/kkFileView-4.4.0/file
+      # 4.4.0 的 jodconverter 4.4.6 能直接对接 LibreOffice 26.8（已实测 Connected），
+      # 引擎自己也用 26.8，不再有 7.3
+      - ./data/lo26/opt/libreoffice26.8:/opt/libreoffice26.8:ro
+      # LibreOffice 自带的度量兼容字体（Carlito≈Calibri、Caladea≈Cambria、
+      # Liberation Serif≈Times New Roman、Tinos≈Times）。不挂这份，Word/PPT 里的
+      # Calibri / Times New Roman 会退到 DejaVu（宽 10~15%），换行与表格必然走位。
+      - ./data/lo26/opt/libreoffice26.8/share/fonts/truetype:/usr/share/fonts/truetype/libreoffice:ro
+      # Windows 中文字体 + 等线（DengXian）。引擎同样会转 Office（兜底路径），
+      # 不挂这份时它的中文会退到文泉驿，和网关转出来的观感不一致。
+      - ./data/fonts:/usr/share/fonts/win:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider --timeout=5 http://127.0.0.1:8012/ || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 20
+      start_period: 90s
+    logging: *log
+
+  # ---------------- 网关 + 统计看板(同一容器) ----------------
+  kk-gateway:
+    build: ./gateway
+    container_name: kk-gateway
+    restart: unless-stopped
+    # 资源限额（2026-11-03 首次设定；2026-11-06 先上调到 30g，当天又按需求定在 15g）
+    # 由来：转换和 API 在同一个容器里，不限额时一场早高峰的批量转换会把整机
+    # CPU 吃满，连带 MySQL/引擎都变慢。实测 8 个 43MB PPT 并发 = 3.1 核 / 3.5GB。
+    # 内存确实顶到过 10G 一次（11-04 16:08，mem_high 告警 peak=10.0GB，阈值 9GB），
+    # 所以最初的 10g 是"刚好卡住峰值"。
+    #
+    # 宿主机 31GB 物理内存，常驻 ceph-osd 8.9G、ceph-mgr 2.9G、kkfileview 2.4G、
+    # kk-mysql 0.9G，available 约 15G。15g 正好是"网关能吃满、又不至于把整机推爆"
+    # 的那条线；再往上是拿 ceph/mysql 的命换的。
+    # memswap_limit 多留 4G：超限时容器内先 OOM 重启，不拖整机进 swap 抖动。
+    # 回退/调整：改这两个数 + docker compose up -d，不用重建镜像。
+    cpus: "8"
+    mem_limit: 15g
+    memswap_limit: 19g
+    ports:
+      - "${GATEWAY_PORT}:9012"
+    environment:
+      MYSQL_HOST: kk-mysql
+      MYSQL_PORT: 3306
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      MYSQL_DB: ${MYSQL_DB}
+      REDIS_HOST: kk-redis
+      REDIS_PORT: 6379
+      KK_BASE: http://kkfileview:8012
+      GATEWAY_PUBLIC_BASE: http://${HOST_IP}:${GATEWAY_PORT}
+      TRUST_HOSTS: ${TRUST_HOSTS}
+      EMBED_ALLOWED_HOSTS: ${EMBED_ALLOWED_HOSTS:-}
+      WHITE_BACKGROUND: ${WHITE_BACKGROUND:-1}
+      # Office 转换走哪条路:
+      #   默认(留空) = 引擎(kkFileView + 常驻 jodconverter 进程池)优先, 冷启动最快
+      #   填扩展名   = 网关直接调 LibreOffice 26.8 优先(仅用于引擎转不动的文件)
+      LOCAL_CONVERT_EXTS: ${LOCAL_CONVERT_EXTS:-}
+      # 引擎转换失败时, 用网关本地 LibreOffice 兜底(26.8 能转 7.3 会崩的复杂 PPT)
+      LOCAL_FALLBACK_EXTS: ${LOCAL_FALLBACK_EXTS:-doc,docx,xls,xlsx,ppt,pptx,wps,et,dps,odt,ods,odp,rtf}
+      SHEET_PREVIEW: ${SHEET_PREVIEW:-1}
+      # xlsx 走原生 HTML 表格(全行列, 不受打印区域限制, 秒开)
+      XLSX_HTML: ${XLSX_HTML:-1}
+      SHEET_EXTS: ${SHEET_EXTS:-xlsx,xlsm,csv}
+      # 表格模式"提前放弃"阈值: 命中任一即不渲染表格, 直接回退 PDF
+      SHEET_DIRECT_MAX_MB: ${SHEET_DIRECT_MAX_MB:-6}
+      SHEET_MAX_PAGE_MB: ${SHEET_MAX_PAGE_MB:-1.5}
+      SHEET_MAX_BUILD_SEC: ${SHEET_MAX_BUILD_SEC:-15}
+      SVG_PREVIEW: ${SVG_PREVIEW:-1}
+      SHEET_RENDER: ${SHEET_RENDER:-lucky}
+      WATERMARK_TXT: "${WATERMARK_TXT}"
+      WATERMARK_ALPHA: ${WATERMARK_ALPHA:-0.05}
+      WATERMARK_FONT: ${WATERMARK_FONT:-Microsoft YaHei}
+      WATERMARK_ANGLE: ${WATERMARK_ANGLE:-10}
+      # 预览页品牌名（引擎自带 kkFileView 字样，代理时统一替换）
+      BRAND_NAME: ${BRAND_NAME:-自研预览引擎}
+      # 表格/幻灯片预览开关（不传的话 .env 里改了也不生效）
+      UNIVER_PREVIEW: ${UNIVER_PREVIEW:-1}
+      UNIVER_SHEET_EXTS: ${UNIVER_SHEET_EXTS:-xlsx,xlsm,xls}
+      UNIVER_SLIDE_EXTS: ${UNIVER_SLIDE_EXTS:-ppt,pptx,pptm,pps,ppsx,ppsm,pot,potx,potm,odp}
+      # 幻灯片页在容器里的留白（像素）：决定"整页刚好铺满可视区"的缩放比例
+      UNIV_SLIDE_PAD_X: ${UNIV_SLIDE_PAD_X:-24}
+      UNIV_SLIDE_PAD_Y: ${UNIV_SLIDE_PAD_Y:-24}
+      # 顶部工具条已在预览里隐藏；若改回显示，把它设为 40 补回高度
+      UNIV_SLIDE_TOP_RESERVE: ${UNIV_SLIDE_TOP_RESERVE:-0}
+      UNIV_SLIDE_RENDER_W: ${UNIV_SLIDE_RENDER_W:-1600}
+      # ---- 压缩包 ----
+      # 清单页可点开内部文件；rar/7z 靠 /opt/kk-tools/7zz（见 volumes）
+      ARCHIVE_RENDER: ${ARCHIVE_RENDER:-1}
+      ARCHIVE_EXTS: ${ARCHIVE_EXTS:-zip,jar,war,ear,apk,epub,tar,tgz,tbz2,txz,gz,bz2,xz,rar,r00,7z,cab,iso}
+      # 压缩包缓存上限。全局缓存（含 PDF/快照/网格）由 tools/gc_cache.py
+      # 每天 03:30 按 21 天 + 200GB 双规则回收，这里的值只影响 .arc 的在线淘汰。
+      ARCHIVE_CACHE_TOTAL_MB: ${ARCHIVE_CACHE_TOTAL_MB:-204800}
+      SEVENZIP_BIN: ${SEVENZIP_BIN:-/opt/kk-tools/7zz}
+      # ---- 缓存时效 / 加载耗时统计 ----
+      # 这些开关以前只写在 .env 里没透传，改了不起作用（一直用的代码默认值）
+      CACHE_TTL_MINUTES: ${CACHE_TTL_MINUTES:-30}
+      # 过期先 HEAD 比对源文件指纹，没变就续期，不重转（DWG 一次 19~30 秒）
+      CACHE_REVALIDATE: ${CACHE_REVALIDATE:-1}
+      # 端到端"加载耗时"统计（预览页可见时上报）。0 = 回到只算接口耗时的旧口径
+      LOAD_METRIC: ${LOAD_METRIC:-1}
+      CAD_RASTER: ${CAD_RASTER:-1}
+      PREVIEW_WAIT_SECONDS: ${PREVIEW_WAIT_SECONDS:-0.5}
+      SECRET_KEY: ${SECRET_KEY}
+      ADMIN_TOKEN: ${ADMIN_TOKEN}
+      STRICT_SIGN: ${STRICT_SIGN}
+      GLOBAL_QPS: ${GLOBAL_QPS}
+      DEFAULT_APP_QPS: ${DEFAULT_APP_QPS}
+      EMP_QPS: ${EMP_QPS}
+      # 单 worker 同时在转的文件数。4→6：12 核机器上 8 路转换只用到 3.1 核，
+      # 极限在排队而不在 CPU；6×2 worker=12 路，仍低于容器 8 核限额的承载能力。
+      MAX_CONCURRENT_CONVERT: ${MAX_CONCURRENT_CONVERT:-6}
+      # 网关本地 LibreOffice 的并发（每 worker）。2→3：12 核机器上 8 路转换
+      # 实测只用到 3.1 核，瓶颈其实是 LO 的排队；调到 3 后单文件等待下降约 1/3。
+      LO_CONVERT_CONC: ${LO_CONVERT_CONC:-3}
+      # 系统批量任务工号前缀（SYS_PLM 等）：只用 appId 配额，不占单工号 20 QPS
+      SYS_EMP_PREFIX: ${SYS_EMP_PREFIX:-SYS}
+      # ---- 服务告警（只看容量/压力，见 gateway/app/alerts.py）----
+      # 内存阈值跟上面的 mem_limit 走：15g 的 87%，留一点缓冲给告警采集和页面刷新；
+      # 设成 18g 比限额还大就永远不会触发了。
+      ALERT_ENABLED: ${ALERT_ENABLED:-1}
+      ALERT_INTERVAL: ${ALERT_INTERVAL:-60}
+      ALERT_CPU_CORES: ${ALERT_CPU_CORES:-8}
+      ALERT_MEM_GB: ${ALERT_MEM_GB:-13}
+      ALERT_DISK_FREE_GB: ${ALERT_DISK_FREE_GB:-20}
+      ALERT_CACHE_GB: ${ALERT_CACHE_GB:-160}
+      ALERT_QUEUE_MAX: ${ALERT_QUEUE_MAX:-20}
+      ALERT_WAIT_MIN: ${ALERT_WAIT_MIN:-5}
+      ALERT_RL_APPS: ${ALERT_RL_APPS:-3}
+      ALERT_RL_COUNT: ${ALERT_RL_COUNT:-300}
+      # Office 转换只用 26.8.1（全网关唯一入口，无 7.3 回退）
+      LO_SOFFICE_LIST: ${LO_SOFFICE_LIST:-/opt/libreoffice26.8/program/soffice}
+      # 明细数据(access_log / audit_log)保留天数, 审计与失败原因可回溯半年
+      RETENTION_DAYS: ${RETENTION_DAYS:-180}
+      TZ: Asia/Shanghai
+    volumes:
+      # 代码目录直接挂载: 改完 docker restart kk-gateway 即生效, 不必重建镜像。
+      # (内网 pypi 不稳, 重建镜像经常卡在 pip install; 挂载也便于现场排障)
+      - ./gateway/app:/app/app
+      # 看板前端(html/js/css): 不挂载的话改完页面不生效, 只能重建镜像
+      - ./gateway/static:/app/static
+      # 表格/PPT 文字降级的渲染产物: 必须持久化,
+      # 否则容器一重启文件就丢, 而 Redis/DB 里的 ready 标记还在 → 预览页 404、用户侧一直"渲染中"
+      - ./data/gateway/sheets:/app/sheets
+      # 源文件只读挂载：缓存过期时直接 stat 源站文件判断"变没变"。
+      # 预转缓存里存的是不带签名的业务地址（签名 5 分钟过期），拿它 HEAD 必然 403，
+      # 只能靠本地文件。没有这行，预转的文件 30 分钟后照样退回重转 20 秒。
+      - /cephfs_data:/cephfs:ro
+      # LibreOffice 26.8.1: 唯一的 Office 转换引擎（7.3 的副本已删除）
+      - ./data/lo26/opt/libreoffice26.8:/opt/libreoffice26.8:ro
+      # Windows 中文字体(从引擎镜像拷出): 没有它们, LibreOffice 只能用文泉驿,
+      # 转出来的 PDF/PPT 字形发虚、和原文排版差异大
+      - ./data/fonts:/usr/share/fonts/win:ro
+      # 7-Zip 静态二进制（7zz）：rar / 7z 压缩包的清单与条目读取。
+      # 运行期 apt 连不上 Debian 源（p7zip / libarchive-tools 都装不进去），
+      # 所以直接挂一个官方 standalone 二进制，无动态依赖，重启不丢。
+      - ./data/tools:/opt/kk-tools:ro
+      # LibreOffice 自带的度量兼容字体：Carlito(≈Calibri)、Caladea(≈Cambria)、
+      # Liberation Serif(≈Times New Roman)。缺了它们西文会退到 DejaVu，
+      # 字宽差 10~15%，Word/PPT 排版整体走位（实测 Calibri→DejaVu 而非 Carlito）。
+      # fontconfig 会自动扫描 /usr/share/fonts 下的新目录，无需 fc-cache。
+      - ./data/lo26/opt/libreoffice26.8/share/fonts/truetype:/usr/share/fonts/truetype/libreoffice:ro
+    depends_on:
+      kk-mysql:
+        condition: service_healthy
+      kk-redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9012/health || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    logging: *log
